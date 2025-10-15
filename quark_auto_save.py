@@ -128,7 +128,6 @@ class Config:
                     task_plugins_config[module_name] = plugin.default_task_config
             except (ImportError, AttributeError) as e:
                 print(f"载入模块 {module_name} 失败: {e}")
-        print()
         return plugins_available, plugins_config, task_plugins_config
 
     def breaking_change_update(config_data):
@@ -339,7 +338,7 @@ class MagicRename:
         if match := re.search(r"\{I+\}", filename):
             magic_i = match.group()
             pattern_i = r"\d" * magic_i.count("I")
-            pattern = filename.replace(magic_i, pattern_i)
+            pattern = re.escape(filename).replace(re.escape(magic_i), pattern_i)
             for filename in filename_list:
                 if re.match(pattern, filename):
                     return filename
