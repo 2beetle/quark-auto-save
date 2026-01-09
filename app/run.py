@@ -186,10 +186,10 @@ def get_data():
 # 更新数据
 @app.route("/update", methods=["POST"])
 def update():
-    global config_data
-    if not is_login():
-        return jsonify({"success": False, "message": "未登录"})
     try:
+        global config_data
+        if not is_login():
+            return jsonify({"success": False, "message": "未登录"})
         dont_save_keys = ["task_plugins_config_default", "api_token"]
         for key, value in request.json.items():
             if key not in dont_save_keys:
