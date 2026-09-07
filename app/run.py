@@ -190,9 +190,11 @@ def update():
         global config_data
         if not is_login():
             return jsonify({"success": False, "message": "未登录"})
-        dont_save_keys = ["task_plugins_config_default", "api_token"]
+        # 使用允许列表防止批量赋值攻击
+        allowed_keys = ["cookie", "crontab", "push_config", "tasklist",
+                        "magic_regex", "plugins", "source"]
         for key, value in request.json.items():
-            if key not in dont_save_keys:
+            if key in allowed_keys:
                 config_data.update({key: value})
         Config.write_json(CONFIG_PATH, config_data)
         # 重新加载任务
@@ -264,17 +266,8 @@ def get_task_suggestions():
         return jsonify({"success": False, "message": "未登录"})
     query = request.args.get("q", "").lower()
     deep = request.args.get("d", "").lower()
-    net_data = config_data.get("source", {}).get("net", {})
     cs_data = config_data.get("source", {}).get("cloudsaver", {})
     ps_data = config_data.get("source", {}).get("pansou", {})
-
-    def net_search():
-        if str(net_data.get("enable", "true")).lower() != "false":
-            base_url = base64.b64decode("aHR0cHM6Ly9zLjkxNzc4OC54eXo=").decode()
-            url = f"{base_url}/task_suggestions?q={query}&d={deep}"
-            response = requests.get(url)
-            return response.json()
-        return []
 
     def cs_search():
         if (
@@ -307,9 +300,10 @@ def get_task_suggestions():
         search_results = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             features = []
-            features.append(executor.submit(net_search))
-            features.append(executor.submit(cs_search))
-            features.append(executor.submit(ps_search))
+            if str(cs_data.get("enable", "true")).lower() == "true":
+                features.append(executor.submit(cs_search))
+            if str(ps_data.get("enable", "true")).lower() == "true":
+                features.append(executor.submit(ps_search))
             for future in as_completed(features):
                 result = future.result()
                 search_results.extend(result)
@@ -360,6 +354,16 @@ def get_share_detail():
         for i in share_detail["data"].get("full_path", [])
     ] or paths
     data["stoken"] = stoken
+
+    # 过滤 01x.mp4 类型无效视频格式
+    if os.getenv("FILTER_INVALID_VIDEO", "true") == "true":
+        for share_file in data["list"]:
+            if (
+                share_file["file_name"].lower().endswith((".mp4", ".mkv"))
+                and not share_file["dir"]
+                and share_file["obj_category"] != "video"
+            ):
+                return jsonify({"success": False, "data": {"error": "无效视频格式"}})
 
     # 正则处理预览
     def preview_regex(data):
@@ -416,9 +420,20 @@ def get_share_detail():
 def get_savepath_detail():
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
+    try:
+        if fid := request.args.get("fid", None):
+            file_list = _get_file_list(fid=fid)
+        elif path := request.args.get("path", "/"):
+            file_list = _get_file_list(path=path)
+        return jsonify({"success": True, "data": file_list})
+    except Exception as e:
+        return jsonify({"success": False, "data": {"error": str(e)}})
+
+
+def _get_file_list(fid: str = None, path: str = None):
     account = Quark(config_data["cookie"][0])
     paths = []
-    if path := request.args.get("path"):
+    if path and not fid:
         path = re.sub(r"/+", "/", path)
         if path == "/":
             fid = 0
@@ -438,26 +453,62 @@ def get_savepath_detail():
                     for get_fid, dir_name in zip(get_fids, dir_names)
                 ]
             else:
-                return jsonify({"success": False, "data": {"error": "获取fid失败"}})
-    else:
-        fid = request.args.get("fid", "0")
+                raise FileNotFoundError("获取fid失败")
     file_list = {
+        "fid": fid,
         "list": account.ls_dir(fid)["data"]["list"],
         "paths": paths,
     }
-    return jsonify({"success": True, "data": file_list})
+    return file_list
+
+
+def _path_to_fid(path):
+    """根据路径获取文件的fid"""
+    if not path:
+        raise ValueError("路径不能为空")
+    path = re.sub(r"/+", "/", path)
+    if path == "/":
+        return 0
+    file_list = _get_file_list(None, os.path.dirname(path))
+    for file in file_list["list"]:
+        if file["file_name"] == os.path.basename(path):
+            return file["fid"]
+    raise FileNotFoundError(f"未找到文件: {path}")
 
 
 @app.route("/delete_file", methods=["POST"])
 def delete_file():
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
-    account = Quark(config_data["cookie"][0])
-    if fid := request.json.get("fid"):
-        response = account.delete([fid])
-    else:
-        response = {"success": False, "message": "缺失必要字段: fid"}
-    return jsonify(response)
+    try:
+        fid = request.json.get("fid") or _path_to_fid(request.json.get("path"))
+        if fid:
+            account = Quark(config_data["cookie"][0])
+            response = account.delete([fid])
+            response["success"] = response["code"] == 0
+            return jsonify(response)
+        else:
+            raise ValueError("缺失必要字段: fid 或 path")
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route("/rename_file", methods=["POST"])
+def rename_file():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    try:
+        fid = request.json.get("fid") or _path_to_fid(request.json.get("path"))
+        file_name = request.json.get("file_name")
+        if fid and file_name:
+            account = Quark(config_data["cookie"][0])
+            response = account.rename(fid, file_name)
+            response["success"] = response["code"] == 0
+            return jsonify(response)
+        else:
+            raise ValueError("缺失必要字段: fid, file_name")
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
 
 
 # 添加任务接口
@@ -587,7 +638,13 @@ def init():
 
     # 初始化插件配置
     _, plugins_config_default, task_plugins_config_default = Config.load_plugins()
-    plugins_config_default.update(config_data.get("plugins", {}))
+    for name, config in plugins_config_default.items():
+        for key, value in config.items():
+            config[key] = (
+                config_data.setdefault("plugins", {})
+                .setdefault(name, {})
+                .get(key, value)
+            )
     config_data["plugins"] = plugins_config_default
 
     # 更新配置
